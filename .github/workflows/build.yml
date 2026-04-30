@@ -1,0 +1,142 @@
+name: Build Passbolt CRX
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # täglich 06:00 UTC
+  workflow_dispatch:       # manueller Trigger
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get latest Passbolt release
+        id: release
+        run: |
+          VERSION=$(curl -s https://api.github.com/repos/passbolt/passbolt_browser_extension/releases/latest \
+            | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Latest version: $VERSION"
+
+      - name: Check if already built
+        id: check
+        run: |
+          CURRENT=""
+          if [ -f dist/passbolt/version.txt ]; then
+            CURRENT=$(cat dist/passbolt/version.txt)
+          fi
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "new=${{ steps.release.outputs.version }}" >> $GITHUB_OUTPUT
+          if [ "$CURRENT" = "${{ steps.release.outputs.version }}" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download Passbolt MV2 ZIP
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          VERSION=${{ steps.release.outputs.version }}
+          curl -sL "https://github.com/passbolt/passbolt_browser_extension/releases/download/v${VERSION}/passbolt-chromium-mv2-${VERSION}.zip" \
+            -o passbolt-mv2.zip
+
+      - name: Extract ZIP
+        if: steps.check.outputs.skip == 'false'
+        run: unzip -q passbolt-mv2.zip -d passbolt-mv2
+
+      - name: Patch server URL
+        if: steps.check.outputs.skip == 'false'
+        env:
+          PASSBOLT_SERVER_URL: ${{ secrets.PASSBOLT_SERVER_URL }}
+        run: |
+          # Ersetze https://www.passbolt.com/start mit der eigenen Instanz
+          # sed -i ist in-place, keine Kopie nötig
+          sed -i "s|https://www.passbolt.com/start|${PASSBOLT_SERVER_URL}|g" \
+            passbolt-mv2/build/all/index.min.js
+          # Prüfen ob Ersetzung erfolgreich war
+          if grep -q "passbolt.com/start" passbolt-mv2/build/all/index.min.js; then
+            echo "ERROR: URL replacement failed"
+            exit 1
+          fi
+          echo "URL patched successfully"
+
+      - name: Setup Chrome for CRX signing
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          # crx3 tool installieren via npm
+          npm install -g crx3
+
+      - name: Write CRX private key
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          echo "${{ secrets.CRX_PRIVATE_KEY_PASSBOLT }}" > passbolt-key.pem
+
+      - name: Build CRX
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          VERSION=${{ steps.release.outputs.version }}
+          crx3 passbolt-mv2/build/all \
+            --keyPath passbolt-key.pem \
+            --crxPath passbolt-extension.crx
+          echo "CRX built: $(ls -lh passbolt-extension.crx)"
+
+      - name: Get Extension ID from key
+        if: steps.check.outputs.skip == 'false'
+        id: extid
+        run: |
+          # Extension ID aus dem Public Key des PEM ableiten
+          PUBKEY=$(openssl rsa -in passbolt-key.pem -pubout -outform DER 2>/dev/null | base64 -w0)
+          # Chrome Extension ID = erste 32 chars des SHA256-Hash des public key, base16→base26 (a-p)
+          HASH=$(echo "$PUBKEY" | base64 -d | sha256sum | awk '{print $1}')
+          ID=""
+          for i in $(seq 0 2 30); do
+            BYTE="${HASH:$i:2}"
+            DEC=$((16#$BYTE))
+            ID="${ID}$(printf "\\x$(printf '%02x' $((DEC % 26 + 97)))")"
+          done
+          echo "Extension ID: $ID"
+          echo "id=$ID" >> $GITHUB_OUTPUT
+
+      - name: Prepare dist
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          VERSION=${{ steps.release.outputs.version }}
+          mkdir -p dist/passbolt
+          cp passbolt-extension.crx dist/passbolt/passbolt-extension.crx
+          echo "$VERSION" > dist/passbolt/version.txt
+          cat > dist/passbolt/update-manifest.xml << EOF
+          <?xml version='1.0' encoding='UTF-8'?>
+          <gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
+            <app appid='${{ steps.extid.outputs.id }}'>
+              <updatecheck codebase='https://lc-it-0.github.io/passbolt-extension/passbolt/passbolt-extension.crx' version='${VERSION}'/>
+            </app>
+          </gupdate>
+          EOF
+
+      - name: Cleanup key
+        if: always()
+        run: rm -f passbolt-key.pem
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
