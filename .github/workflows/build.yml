@@ -64,11 +64,17 @@ jobs:
           cat > passbolt-mv2/build/all/preseed.js << EOF
           (async () => {
             const existing = await new Promise(r => chrome.storage.local.get("_passbolt_data", r));
-            if (existing._passbolt_data?.config?.["user.settings.trustedDomain"]) return;
+            // isValid() requires trustedDomain AND all three security token fields.
+            // Only seed if not already fully configured.
+            if (existing._passbolt_data?.config?.["user.settings.trustedDomain"] &&
+                existing._passbolt_data?.config?.["user.settings.securityToken.code"]) return;
             await new Promise(r => chrome.storage.local.set({
               _passbolt_data: {
                 config: {
-                  "user.settings.trustedDomain": "${PASSBOLT_SERVER_URL}"
+                  "user.settings.trustedDomain": "${PASSBOLT_SERVER_URL}",
+                  "user.settings.securityToken.code": "PSB",
+                  "user.settings.securityToken.color": "#1f365d",
+                  "user.settings.securityToken.textColor": "#ffffff"
                 }
               }
             }, r));
