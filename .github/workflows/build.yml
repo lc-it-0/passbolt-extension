@@ -52,45 +52,21 @@ jobs:
             -o passbolt-mv2.zip
           unzip -q passbolt-mv2.zip -d passbolt-mv2
 
-      - name: Inject server URL pre-seed script
+      - name: Patch getting-started URL
         if: steps.check_built.outputs.skip == 'false'
         env:
           PASSBOLT_SERVER_URL: ${{ secrets.PASSBOLT_SERVER_URL }}
         run: |
-          # Write preseed.js — runs before index.min.js and pre-populates
-          # chrome.storage.local with the trusted domain so the extension
-          # connects to the self-hosted instance on first launch.
-          # Only writes if not already configured (idempotent).
-          cat > passbolt-mv2/build/all/preseed.js << EOF
-          (async () => {
-            const existing = await new Promise(r => chrome.storage.local.get("_passbolt_data", r));
-            // isValid() requires trustedDomain AND all three security token fields.
-            // Only seed if not already fully configured.
-            if (existing._passbolt_data?.config?.["user.settings.trustedDomain"] &&
-                existing._passbolt_data?.config?.["user.settings.securityToken.code"]) return;
-            await new Promise(r => chrome.storage.local.set({
-              _passbolt_data: {
-                config: {
-                  "user.settings.trustedDomain": "${PASSBOLT_SERVER_URL}",
-                  "user.settings.securityToken.code": "PSB",
-                  "user.settings.securityToken.color": "#1f365d",
-                  "user.settings.securityToken.textColor": "#ffffff"
-                }
-              }
-            }, r));
-          })();
-          EOF
-
-          # Inject preseed.js as the first script in the background page
-          sed -i 's|<script type="text/javascript" src="vendors.min.js"></script>|<script type="text/javascript" src="preseed.js"></script>\n\t<script type="text/javascript" src="vendors.min.js"></script>|' \
-            passbolt-mv2/build/all/index.html
-
-          # Verify injection
-          if ! grep -q "preseed.js" passbolt-mv2/build/all/index.html; then
-            echo "ERROR: preseed.js injection failed"
+          # Replace the hardcoded passbolt.com getting-started URL with the self-hosted instance.
+          # This is the URL opened when the extension icon is clicked and no account is configured.
+          sed -i "s|https://www.passbolt.com/start|${PASSBOLT_SERVER_URL}|g" \
+            passbolt-mv2/build/all/index.min.js
+          COUNT=$(grep -c "passbolt.com/start" passbolt-mv2/build/all/index.min.js || true)
+          if [ "$COUNT" -gt "0" ]; then
+            echo "ERROR: URL patch failed, $COUNT occurrences remain"
             exit 1
           fi
-          echo "Pre-seed script injected successfully"
+          echo "URL patched successfully"
 
       - name: Install crx3 builder
         if: steps.check_built.outputs.skip == 'false'
