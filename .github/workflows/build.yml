@@ -52,19 +52,39 @@ jobs:
             -o passbolt-mv2.zip
           unzip -q passbolt-mv2.zip -d passbolt-mv2
 
-      - name: Patch server URL
+      - name: Inject server URL pre-seed script
         if: steps.check_built.outputs.skip == 'false'
         env:
           PASSBOLT_SERVER_URL: ${{ secrets.PASSBOLT_SERVER_URL }}
         run: |
-          # Replace the default passbolt.com start URL with the self-hosted instance
-          sed -i "s|https://www.passbolt.com/start|${PASSBOLT_SERVER_URL}|g" \
-            passbolt-mv2/build/all/index.min.js
-          if grep -q "passbolt.com/start" passbolt-mv2/build/all/index.min.js; then
-            echo "ERROR: URL patch failed"
+          # Write preseed.js — runs before index.min.js and pre-populates
+          # chrome.storage.local with the trusted domain so the extension
+          # connects to the self-hosted instance on first launch.
+          # Only writes if not already configured (idempotent).
+          cat > passbolt-mv2/build/all/preseed.js << EOF
+          (async () => {
+            const existing = await new Promise(r => chrome.storage.local.get("_passbolt_data", r));
+            if (existing._passbolt_data?.config?.["user.settings.trustedDomain"]) return;
+            await new Promise(r => chrome.storage.local.set({
+              _passbolt_data: {
+                config: {
+                  "user.settings.trustedDomain": "${PASSBOLT_SERVER_URL}"
+                }
+              }
+            }, r));
+          })();
+          EOF
+
+          # Inject preseed.js as the first script in the background page
+          sed -i 's|<script type="text/javascript" src="vendors.min.js"></script>|<script type="text/javascript" src="preseed.js"></script>\n\t<script type="text/javascript" src="vendors.min.js"></script>|' \
+            passbolt-mv2/build/all/index.html
+
+          # Verify injection
+          if ! grep -q "preseed.js" passbolt-mv2/build/all/index.html; then
+            echo "ERROR: preseed.js injection failed"
             exit 1
           fi
-          echo "URL patched successfully"
+          echo "Pre-seed script injected successfully"
 
       - name: Install crx3 builder
         if: steps.check_built.outputs.skip == 'false'
